@@ -13,7 +13,7 @@ Set your AWS credentials in `~/.aws/credentials` as you would for running the AW
 
 Beware that the access key used must have S3 permissions, including `s3:RestoreObject` needed to restore objects from Glacier.
 
-To set up:
+## Setting up
 
 ```
 nvm install
@@ -21,8 +21,20 @@ npm install
 npm run build
 ```
 
-To run:
+## Running
 
 ```
-node dist/index.js
+npm start
+```
+
+## Installing globally
+
+```
+npm install -g .
+```
+
+Then you can run it as:
+
+```
+glacier-retrieve
 ```

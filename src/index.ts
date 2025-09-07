@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { S3Client, ListBucketsCommand, ListObjectsV2Command, HeadObjectCommand, RestoreObjectCommand } from '@aws-sdk/client-s3';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -604,11 +605,16 @@ class AWSGlacierTool {
         console.log('  dry-run <bucket>        - Simulate restoration without actually restoring files');
         console.log('  restore <bucket>        - Restore files from Deep Glacier (bulk mode, 2 days)');
         console.log('  status <bucket>         - Check status of ongoing Glacier retrievals');
-        console.log('\nUsage:');
-        console.log('  node dist/index.js list');
-        console.log('  node dist/index.js dry-run my-bucket-name');
-        console.log('  node dist/index.js restore my-bucket-name');
-        console.log('  node dist/index.js status my-bucket-name');
+        console.log('\nUsage Options:');
+        console.log('  npm start [command]              # Recommended for development');
+        console.log('  ./dist/index.js [command]        # Direct execution');
+        console.log('  npx . [command]                  # Using npx');
+        console.log('  glacier-retrieve [command]       # After global install (npm install -g .)');
+        console.log('\nExamples:');
+        console.log('  npm start list');
+        console.log('  ./dist/index.js dry-run my-bucket-name');
+        console.log('  npx . restore my-bucket-name');
+        console.log('  glacier-retrieve status my-bucket-name');
     }
 
     /**

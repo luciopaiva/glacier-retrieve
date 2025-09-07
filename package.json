@@ -3,7 +3,11 @@
   "version": "1.0.0",
   "description": "",
   "main": "dist/index.js",
+  "bin": {
+    "glacier-retrieve": "dist/index.js"
+  },
   "scripts": {
+    "start": "node dist/index.js",
     "build": "tsc",
     "type-check": "tsc --noEmit"
   },
