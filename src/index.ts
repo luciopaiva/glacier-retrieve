@@ -195,13 +195,62 @@ class AWSGlacierTool {
     }
 
     /**
+     * Get Glacier objects that are not currently being restored or already restored
+     */
+    private async getRestorableGlacierObjects(bucketName: string): Promise<S3Object[]> {
+        console.log(`Scanning bucket "${bucketName}" for restorable objects...`);
+
+        // Get all objects in the bucket
+        const allObjects = await this.getBucketObjects(bucketName);
+
+        if (allObjects.length === 0) {
+          return [];
+        }
+
+        // Filter objects that are in Glacier storage classes
+        const glacierObjects = this.filterGlacierObjects(allObjects);
+
+        if (glacierObjects.length === 0) {
+          return [];
+        }
+
+        console.log(`Found ${glacierObjects.length} Glacier objects. Checking restoration status...`);
+
+        // Check status of each Glacier object
+        const restorableObjects: S3Object[] = [];
+        let processed = 0;
+
+        for (const obj of glacierObjects) {
+          const status = await this.getObjectRestoreStatus(bucketName, obj.key);
+
+          // Only include objects that are not currently requested for restoration
+          if (status.restoreStatus === 'not-requested') {
+            restorableObjects.push(obj);
+          }
+
+          processed++;
+          if (processed % 10 === 0) {
+            console.log(`Checked ${processed}/${glacierObjects.length} objects...`);
+          }
+        }
+
+        const inProgressCount = glacierObjects.length - restorableObjects.length;
+        if (inProgressCount > 0) {
+          console.log(`Skipping ${inProgressCount} objects that are already in progress or completed.`);
+        }
+
+        console.log(`Found ${restorableObjects.length} objects available for restoration.`);
+        return restorableObjects;
+      }
+
+    /**
      * Perform dry run analysis of what would be restored
      */
     public async dryRunRestore(bucketName: string): Promise<RestoreOperation> {
         console.log(`\nPerforming dry-run analysis for bucket: ${bucketName}`);
         console.log('=' .repeat(60));
 
-        // Get all objects in the bucket
+        // Get all objects in the bucket for overview
         const allObjects = await this.getBucketObjects(bucketName);
 
         if (allObjects.length === 0) {
@@ -213,12 +262,7 @@ class AWSGlacierTool {
             };
         }
 
-        // Filter objects that are in Glacier storage classes
-        const glacierObjects = this.filterGlacierObjects(allObjects);
-
-        // Calculate total size
-        const totalSize = glacierObjects.reduce((sum, obj) => sum + obj.size, 0);
-
+        // Show storage class distribution
         console.log(`\nStorage class distribution:`);
         const storageClassCounts = new Map<string, number>();
         const storageClassSizes = new Map<string, number>();
@@ -234,32 +278,44 @@ class AWSGlacierTool {
             console.log(`  ${storageClass}: ${count} objects (${this.formatBytes(size)})`);
         }
 
-        if (glacierObjects.length === 0) {
-            console.log('No objects found in Glacier storage classes.');
+        // Get only restorable Glacier objects (excluding in-progress/completed)
+        const restorableObjects = await this.getRestorableGlacierObjects(bucketName);
+
+        // Calculate total size
+        const totalSize = restorableObjects.reduce((sum, obj) => sum + obj.size, 0);
+
+        console.log(`\nObjects that would be restored from Glacier storage classes:`);
+        console.log('-'.repeat(60));
+
+        if (restorableObjects.length === 0) {
+            console.log('No objects available for restoration.');
+            console.log('(All Glacier objects may already be in progress or completed)');
         } else {
             // Sort by size (largest first) for better visibility
-            glacierObjects.sort((a, b) => b.size - a.size);
+            restorableObjects.sort((a, b) => b.size - a.size);
 
-            const longestKeyLength = 2 + glacierObjects.reduce((max, obj) => Math.max(max, obj.key.length), 0);
-            const horizontalBarLength = longestKeyLength + 30;
+            // Display first 20 objects to avoid overwhelming output
+            const displayObjects = restorableObjects.slice(0, 20);
 
-            console.log(`\nObjects that would be restored from Glacier storage classes:`);
-            console.log('-'.repeat(horizontalBarLength));
+            console.log('Key'.padEnd(50) + 'Storage Class'.padEnd(15) + 'Size');
+            console.log('-'.repeat(80));
 
-            console.log('Key'.padEnd(longestKeyLength) + 'Storage Class'.padEnd(15) + 'Size');
-            console.log('-'.repeat(horizontalBarLength));
-
-            glacierObjects.forEach(obj => {
+            displayObjects.forEach(obj => {
+                const key = obj.key.length > 45 ? '...' + obj.key.slice(-42) : obj.key;
                 console.log(
-                    obj.key.padEnd(longestKeyLength) +
+                    key.padEnd(50) +
                     obj.storageClass.padEnd(15) +
                     this.formatBytes(obj.size)
                 );
             });
+
+            if (restorableObjects.length > 20) {
+                console.log(`... and ${restorableObjects.length - 20} more objects`);
+            }
         }
 
         return {
-            objects: glacierObjects,
+            objects: restorableObjects,
             totalSize: totalSize,
             totalSizeFormatted: this.formatBytes(totalSize)
         };
