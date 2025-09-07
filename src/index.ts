@@ -107,19 +107,72 @@ class AWSGlacierTool {
     console.log(`\nTotal storage across all buckets: ${this.formatBytes(totalSize)}`);
     console.log(`Number of buckets: ${buckets.length}`);
   }
+
+  /**
+   * Show available commands
+   */
+  public showHelp(): void {
+    console.log('AWS S3 Glacier Management Tool');
+    console.log('==============================\n');
+    console.log('Available commands:');
+    console.log('  list                    - List all S3 buckets and their sizes');
+    console.log('  restore <bucket>        - Check and restore files from Deep Glacier (coming soon)');
+    console.log('  status <bucket>         - Check status of ongoing Glacier retrievals (coming soon)');
+    console.log('\nUsage:');
+    console.log('  node dist/index.js list');
+    console.log('  node dist/index.js restore my-bucket-name');
+    console.log('  node dist/index.js status my-bucket-name');
+  }
 }
 
 // Main execution
 async function main() {
   try {
     const tool = new AWSGlacierTool();
+    const args = process.argv.slice(2);
+    const command = args[0];
 
-    console.log('AWS S3 Glacier Management Tool');
-    console.log('==============================\n');
+    if (!command) {
+      tool.showHelp();
+      return;
+    }
 
-    // Feature 1: List all buckets and their sizes
-    const buckets = await tool.listBucketsWithSizes();
-    tool.displayBuckets(buckets);
+    switch (command.toLowerCase()) {
+      case 'list':
+        console.log('AWS S3 Glacier Management Tool');
+        console.log('==============================\n');
+
+        // Feature 1: List all buckets and their sizes
+        const buckets = await tool.listBucketsWithSizes();
+        tool.displayBuckets(buckets);
+        break;
+
+      case 'restore':
+        const bucketName = args[1];
+        if (!bucketName) {
+          console.error('Error: Please specify a bucket name');
+          console.log('Usage: node dist/index.js restore <bucket-name>');
+          process.exit(1);
+        }
+        console.log(`Restore feature for bucket "${bucketName}" - Coming soon!`);
+        break;
+
+      case 'status':
+        const statusBucketName = args[1];
+        if (!statusBucketName) {
+          console.error('Error: Please specify a bucket name');
+          console.log('Usage: node dist/index.js status <bucket-name>');
+          process.exit(1);
+        }
+        console.log(`Status feature for bucket "${statusBucketName}" - Coming soon!`);
+        break;
+
+      default:
+        console.error(`Error: Unknown command "${command}"`);
+        console.log('');
+        tool.showHelp();
+        process.exit(1);
+    }
 
   } catch (error) {
     console.error('Error:', error);
