@@ -15,6 +15,8 @@ Beware that the access key used must have S3 permissions, including `s3:RestoreO
 
 ## Setting up
 
+This will install the dependencies and build the project for running.
+
 ```
 nvm install
 npm install
@@ -22,6 +24,8 @@ npm run build
 ```
 
 ## Running
+
+If you just want to run it without installing globally, you can do:
 
 ```
 npm start
