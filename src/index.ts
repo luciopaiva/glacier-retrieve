@@ -540,16 +540,6 @@ class AWSGlacierTool {
     public async displayRestoreStatus(bucketName: string): Promise<void> {
         const summary = await this.checkRestoreStatus(bucketName);
 
-        console.log('\n' + '='.repeat(60));
-        console.log('RESTORE STATUS SUMMARY');
-        console.log('='.repeat(60));
-        console.log(`Bucket: ${summary.bucketName}`);
-        console.log(`Total Glacier objects: ${summary.glacierObjects.length}`);
-        console.log();
-        console.log(`📥 In Progress: ${summary.inProgress.length} objects (${this.formatBytes(summary.totalSizeInProgress)})`);
-        console.log(`✅ Completed: ${summary.completed.length} objects (${this.formatBytes(summary.totalSizeCompleted)})`);
-        console.log(`⏸️  Not Requested: ${summary.notRequested.length} objects`);
-
         if (summary.inProgress.length > 0) {
             console.log('\n' + '-'.repeat(60));
             console.log('OBJECTS WITH ONGOING RESTORE REQUESTS:');
@@ -575,10 +565,20 @@ class AWSGlacierTool {
         }
 
         console.log('\n' + '='.repeat(60));
+        console.log('RESTORE STATUS SUMMARY');
+        console.log('='.repeat(60));
+        console.log(`Bucket: ${summary.bucketName}`);
+        console.log(`Total Glacier objects: ${summary.glacierObjects.length}`);
+        console.log();
+        console.log(`- In Progress: ${summary.inProgress.length} objects (${this.formatBytes(summary.totalSizeInProgress)})`);
+        console.log(`- Completed: ${summary.completed.length} objects (${this.formatBytes(summary.totalSizeCompleted)})`);
+        console.log(`- Not Requested: ${summary.notRequested.length} objects`);
+
+        console.log('\n' + '='.repeat(60));
         if (summary.inProgress.length > 0) {
             console.log('⏳ Some restore requests are still in progress.');
-            console.log('   Files will be available for download once restoration completes.');
-            console.log('   Bulk requests typically take 5-12 hours to complete.');
+            console.log('  Files will be available for download once restoration completes.');
+            console.log('  Bulk requests typically take 5-12 hours to complete.');
         }
         if (summary.completed.length > 0) {
             console.log('✅ Some files are ready for download!');
