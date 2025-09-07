@@ -7,6 +7,19 @@ interface S3Bucket {
   sizeFormatted: string;
 }
 
+interface S3Object {
+  key: string;
+  size: number;
+  storageClass: string;
+  lastModified: string;
+}
+
+interface RestoreOperation {
+  objects: S3Object[];
+  totalSize: number;
+  totalSizeFormatted: string;
+}
+
 class AWSGlacierTool {
   /**
    * Execute AWS CLI command and return the output
@@ -51,6 +64,188 @@ class AWSGlacierTool {
       console.warn(`Warning: Could not get size for bucket ${bucketName}: ${error}`);
       return 0;
     }
+  }
+
+  /**
+   * Get all objects in a bucket with their storage class information
+   */
+  private async getBucketObjects(bucketName: string): Promise<S3Object[]> {
+    console.log(`Scanning bucket "${bucketName}" for objects...`);
+
+    const objects: S3Object[] = [];
+    let continuationToken = '';
+
+    do {
+      const tokenParam = continuationToken ? `--continuation-token "${continuationToken}"` : '';
+      const command = `aws s3api list-objects-v2 --bucket "${bucketName}" ${tokenParam} --query "Contents[].{Key:Key,Size:Size,StorageClass:StorageClass,LastModified:LastModified}" --output json`;
+
+      try {
+        const output = this.executeAwsCommand(command);
+        const objectsData = JSON.parse(output);
+
+        if (objectsData && Array.isArray(objectsData)) {
+          for (const obj of objectsData) {
+            objects.push({
+              key: obj.Key,
+              size: obj.Size || 0,
+              storageClass: obj.StorageClass || 'STANDARD',
+              lastModified: obj.LastModified
+            });
+          }
+        }
+
+        // Check if there are more objects to fetch
+        const nextTokenCommand = `aws s3api list-objects-v2 --bucket "${bucketName}" ${tokenParam} --query "NextContinuationToken" --output text`;
+        const nextToken = this.executeAwsCommand(nextTokenCommand);
+        continuationToken = (nextToken && nextToken !== 'None') ? nextToken : '';
+
+      } catch (error) {
+        throw new Error(`Failed to list objects in bucket ${bucketName}: ${error}`);
+      }
+    } while (continuationToken);
+
+    console.log(`Found ${objects.length} objects in bucket "${bucketName}"`);
+    return objects;
+  }
+
+  /**
+   * Filter objects that need to be restored from Glacier storage classes
+   */
+  private filterGlacierObjects(objects: S3Object[]): S3Object[] {
+    const glacierStorageClasses = [
+      'GLACIER',
+      'DEEP_ARCHIVE',
+      'GLACIER_IR' // Glacier Instant Retrieval
+    ];
+
+    return objects.filter(obj =>
+      glacierStorageClasses.includes(obj.storageClass)
+    );
+  }
+
+  /**
+   * Perform dry run analysis of what would be restored
+   */
+  public async dryRunRestore(bucketName: string): Promise<RestoreOperation> {
+    console.log(`\nPerforming dry-run analysis for bucket: ${bucketName}`);
+    console.log('=' .repeat(60));
+
+    // Get all objects in the bucket
+    const allObjects = await this.getBucketObjects(bucketName);
+
+    if (allObjects.length === 0) {
+      console.log(`No objects found in bucket "${bucketName}"`);
+      return {
+        objects: [],
+        totalSize: 0,
+        totalSizeFormatted: '0 B'
+      };
+    }
+
+    // Filter objects that are in Glacier storage classes
+    const glacierObjects = this.filterGlacierObjects(allObjects);
+
+    // Calculate total size
+    const totalSize = glacierObjects.reduce((sum, obj) => sum + obj.size, 0);
+
+    console.log(`\nStorage class distribution:`);
+    const storageClassCounts = new Map<string, number>();
+    const storageClassSizes = new Map<string, number>();
+
+    allObjects.forEach(obj => {
+      const storageClass = obj.storageClass;
+      storageClassCounts.set(storageClass, (storageClassCounts.get(storageClass) || 0) + 1);
+      storageClassSizes.set(storageClass, (storageClassSizes.get(storageClass) || 0) + obj.size);
+    });
+
+    for (const [storageClass, count] of storageClassCounts.entries()) {
+      const size = storageClassSizes.get(storageClass) || 0;
+      console.log(`  ${storageClass}: ${count} objects (${this.formatBytes(size)})`);
+    }
+
+    console.log(`\nObjects that would be restored from Glacier storage classes:`);
+    console.log('-'.repeat(60));
+
+    if (glacierObjects.length === 0) {
+      console.log('No objects found in Glacier storage classes.');
+    } else {
+      // Sort by size (largest first) for better visibility
+      glacierObjects.sort((a, b) => b.size - a.size);
+
+      // Display first 20 objects to avoid overwhelming output
+      const displayObjects = glacierObjects.slice(0, 20);
+
+      console.log('Key'.padEnd(50) + 'Storage Class'.padEnd(15) + 'Size');
+      console.log('-'.repeat(80));
+
+      displayObjects.forEach(obj => {
+        const key = obj.key.length > 45 ? '...' + obj.key.slice(-42) : obj.key;
+        console.log(
+          key.padEnd(50) +
+          obj.storageClass.padEnd(15) +
+          this.formatBytes(obj.size)
+        );
+      });
+
+      if (glacierObjects.length > 20) {
+        console.log(`... and ${glacierObjects.length - 20} more objects`);
+      }
+    }
+
+    return {
+      objects: glacierObjects,
+      totalSize: totalSize,
+      totalSizeFormatted: this.formatBytes(totalSize)
+    };
+  }
+
+  /**
+   * Actually restore objects from Glacier (bulk mode, 2 days)
+   */
+  public async restoreObjects(bucketName: string, dryRun: boolean = false): Promise<RestoreOperation> {
+    const operation = await this.dryRunRestore(bucketName);
+
+    if (dryRun || operation.objects.length === 0) {
+      return operation;
+    }
+
+    console.log(`\nStarting restoration of ${operation.objects.length} objects...`);
+    console.log('Restoration mode: Bulk (2 days retention)');
+    console.log('=' .repeat(60));
+
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (const obj of operation.objects) {
+      try {
+        const restoreRequest = {
+          Days: 2,
+          GlacierJobParameters: {
+            Tier: 'Bulk'
+          }
+        };
+
+        const command = `aws s3api restore-object --bucket "${bucketName}" --key "${obj.key}" --restore-request '${JSON.stringify(restoreRequest)}'`;
+
+        this.executeAwsCommand(command);
+        successCount++;
+
+        if (successCount % 10 === 0) {
+          console.log(`Processed ${successCount}/${operation.objects.length} objects...`);
+        }
+
+      } catch (error) {
+        errorCount++;
+        console.warn(`Failed to restore ${obj.key}: ${error}`);
+      }
+    }
+
+    console.log(`\nRestoration request completed:`);
+    console.log(`  Successfully requested: ${successCount} objects`);
+    console.log(`  Failed: ${errorCount} objects`);
+    console.log(`  Total size to be restored: ${operation.totalSizeFormatted}`);
+
+    return operation;
   }
 
   /**
@@ -116,10 +311,12 @@ class AWSGlacierTool {
     console.log('==============================\n');
     console.log('Available commands:');
     console.log('  list                    - List all S3 buckets and their sizes');
-    console.log('  restore <bucket>        - Check and restore files from Deep Glacier (coming soon)');
+    console.log('  dry-run <bucket>        - Simulate restoration without actually restoring files');
+    console.log('  restore <bucket>        - Restore files from Deep Glacier (bulk mode, 2 days)');
     console.log('  status <bucket>         - Check status of ongoing Glacier retrievals (coming soon)');
     console.log('\nUsage:');
     console.log('  node dist/index.js list');
+    console.log('  node dist/index.js dry-run my-bucket-name');
     console.log('  node dist/index.js restore my-bucket-name');
     console.log('  node dist/index.js status my-bucket-name');
   }
@@ -147,6 +344,26 @@ async function main() {
         tool.displayBuckets(buckets);
         break;
 
+      case 'dry-run':
+        const dryRunBucketName = args[1];
+        if (!dryRunBucketName) {
+          console.error('Error: Please specify a bucket name');
+          console.log('Usage: node dist/index.js dry-run <bucket-name>');
+          process.exit(1);
+        }
+
+        const dryRunResult = await tool.dryRunRestore(dryRunBucketName);
+
+        console.log(`\n${'='.repeat(60)}`);
+        console.log('DRY RUN SUMMARY');
+        console.log(`${'='.repeat(60)}`);
+        console.log(`Bucket: ${dryRunBucketName}`);
+        console.log(`Objects to restore: ${dryRunResult.objects.length}`);
+        console.log(`Total size to restore: ${dryRunResult.totalSizeFormatted}`);
+        console.log(`\nNote: This was a dry run. No files were actually restored.`);
+        console.log(`Run 'restore ${dryRunBucketName}' to perform the actual restoration.`);
+        break;
+
       case 'restore':
         const bucketName = args[1];
         if (!bucketName) {
@@ -154,7 +371,18 @@ async function main() {
           console.log('Usage: node dist/index.js restore <bucket-name>');
           process.exit(1);
         }
-        console.log(`Restore feature for bucket "${bucketName}" - Coming soon!`);
+
+        const restoreResult = await tool.restoreObjects(bucketName, false);
+
+        console.log(`\n${'='.repeat(60)}`);
+        console.log('RESTORATION SUMMARY');
+        console.log(`${'='.repeat(60)}`);
+        console.log(`Bucket: ${bucketName}`);
+        console.log(`Objects processed: ${restoreResult.objects.length}`);
+        console.log(`Total size: ${restoreResult.totalSizeFormatted}`);
+        console.log(`\nRestoration requests have been submitted.`);
+        console.log(`Files will be available for download in a few hours (bulk mode).`);
+        console.log(`Use 'status ${bucketName}' to check restoration progress.`);
         break;
 
       case 'status':
