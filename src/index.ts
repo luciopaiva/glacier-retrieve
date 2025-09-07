@@ -30,10 +30,10 @@ interface RestoreStatus {
 
 interface StatusSummary {
   bucketName: string;
-  totalObjects: number;
-  inProgress: number;
-  completed: number;
-  notRequested: number;
+  glacierObjects: S3Object[];
+  inProgress: RestoreStatus[];
+  completed: RestoreStatus[];
+  notRequested: RestoreStatus[];
   totalSizeInProgress: number;
   totalSizeCompleted: number;
 }
@@ -381,10 +381,10 @@ class AWSGlacierTool {
       console.log('No objects found in Glacier storage classes.');
       return {
         bucketName: bucketName,
-        totalObjects: 0,
-        inProgress: 0,
-        completed: 0,
-        notRequested: 0,
+        glacierObjects: [],
+        inProgress: [],
+        completed: [],
+        notRequested: [],
         totalSizeInProgress: 0,
         totalSizeCompleted: 0
       };
@@ -416,10 +416,10 @@ class AWSGlacierTool {
 
     return {
       bucketName: bucketName,
-      totalObjects: glacierObjects.length,
-      inProgress: inProgress.length,
-      completed: completed.length,
-      notRequested: notRequested.length,
+      glacierObjects: glacierObjects,
+      inProgress: inProgress,
+      completed: completed,
+      notRequested: notRequested,
       totalSizeInProgress: totalSizeInProgress,
       totalSizeCompleted: totalSizeCompleted
     };
@@ -435,74 +435,48 @@ class AWSGlacierTool {
     console.log('RESTORE STATUS SUMMARY');
     console.log('='.repeat(60));
     console.log(`Bucket: ${summary.bucketName}`);
-    console.log(`Total Glacier objects: ${summary.totalObjects}`);
+    console.log(`Total Glacier objects: ${summary.glacierObjects.length}`);
     console.log();
-    console.log(`📥 In Progress: ${summary.inProgress} objects (${this.formatBytes(summary.totalSizeInProgress)})`);
-    console.log(`✅ Completed: ${summary.completed} objects (${this.formatBytes(summary.totalSizeCompleted)})`);
-    console.log(`⏸️  Not Requested: ${summary.notRequested} objects`);
+    console.log(`📥 In Progress: ${summary.inProgress.length} objects (${this.formatBytes(summary.totalSizeInProgress)})`);
+    console.log(`✅ Completed: ${summary.completed.length} objects (${this.formatBytes(summary.totalSizeCompleted)})`);
+    console.log(`⏸️  Not Requested: ${summary.notRequested.length} objects`);
 
-    if (summary.inProgress > 0) {
+    if (summary.inProgress.length > 0) {
       console.log('\n' + '-'.repeat(60));
       console.log('OBJECTS WITH ONGOING RESTORE REQUESTS:');
       console.log('-'.repeat(60));
 
-      // Get detailed status for in-progress objects
-      const allObjects = await this.getBucketObjects(bucketName);
-      const glacierObjects = this.filterGlacierObjects(allObjects);
-
-      let inProgressCount = 0;
-      for (const obj of glacierObjects) {
-        const status = await this.getObjectRestoreStatus(bucketName, obj.key);
-        if (status.restoreStatus === 'in-progress') {
-          const key = obj.key.length > 50 ? '...' + obj.key.slice(-47) : obj.key;
-          console.log(`${key.padEnd(50)} ${status.storageClass.padEnd(15)} ${this.formatBytes(obj.size)}`);
-          inProgressCount++;
-          if (inProgressCount >= 20) {
-            console.log(`... and ${summary.inProgress - 20} more objects`);
-            break;
-          }
-        }
+      for (const status of summary.inProgress) {
+          const key = status.key.length > 50 ? '...' + status.key.slice(-47) : status.key;
+          console.log(`${key.padEnd(50)} ${status.storageClass.padEnd(15)} ${this.formatBytes(status.size)}`);
       }
     }
 
-    if (summary.completed > 0) {
+    if (summary.completed.length > 0) {
       console.log('\n' + '-'.repeat(60));
       console.log('RECENTLY COMPLETED RESTORES:');
       console.log('-'.repeat(60));
 
-      // Get detailed status for completed objects
-      const allObjects = await this.getBucketObjects(bucketName);
-      const glacierObjects = this.filterGlacierObjects(allObjects);
-
-      let completedCount = 0;
-      for (const obj of glacierObjects) {
-        const status = await this.getObjectRestoreStatus(bucketName, obj.key);
-        if (status.restoreStatus === 'completed') {
-          const key = obj.key.length > 40 ? '...' + obj.key.slice(-37) : obj.key;
+      for (const status of summary.completed) {
+          const key = status.key.length > 40 ? '...' + status.key.slice(-37) : status.key;
           const expiry = status.restoreExpiryDate ?
-            new Date(status.restoreExpiryDate).toLocaleDateString() : 'Unknown';
-          console.log(`${key.padEnd(40)} ${status.storageClass.padEnd(15)} ${this.formatBytes(obj.size).padEnd(10)} Expires: ${expiry}`);
-          completedCount++;
-          if (completedCount >= 10) {
-            console.log(`... and ${summary.completed - 10} more objects`);
-            break;
-          }
-        }
+              new Date(status.restoreExpiryDate).toLocaleDateString() : 'Unknown';
+          console.log(`${key.padEnd(40)} ${status.storageClass.padEnd(15)} ${this.formatBytes(status.size).padEnd(10)} Expires: ${expiry}`);
       }
     }
 
     console.log('\n' + '='.repeat(60));
-    if (summary.inProgress > 0) {
+    if (summary.inProgress.length > 0) {
       console.log('⏳ Some restore requests are still in progress.');
       console.log('   Files will be available for download once restoration completes.');
       console.log('   Bulk requests typically take 5-12 hours to complete.');
     }
-    if (summary.completed > 0) {
+    if (summary.completed.length > 0) {
       console.log('✅ Some files are ready for download!');
       console.log('   Note: Restored files are temporarily available and will expire.');
     }
-    if (summary.notRequested > 0) {
-      console.log(`🔄 ${summary.notRequested} objects have not been restored yet.`);
+    if (summary.notRequested.length > 0) {
+      console.log(`🔄 ${summary.notRequested.length} objects have not been restored yet.`);
       console.log(`   Run 'dry-run ${bucketName}' to see what would be restored.`);
     }
   }
