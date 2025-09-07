@@ -1,4 +1,12 @@
-import { execSync } from 'child_process';
+import { S3Client, ListBucketsCommand, ListObjectsV2Command, HeadObjectCommand, RestoreObjectCommand } from '@aws-sdk/client-s3';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+interface AWSConfig {
+  accessKeyId: string;
+  secretAccessKey: string;
+  region: string;
+}
 
 interface S3Bucket {
   name: string;
@@ -39,15 +47,51 @@ interface StatusSummary {
 }
 
 class AWSGlacierTool {
-  /**
-   * Execute AWS CLI command and return the output
-   */
-  private executeAwsCommand(command: string): string {
+  private s3Client: S3Client;
+
+  constructor() {
+    // Load AWS config from ~/.aws/credentials
     try {
-      const output = execSync(command, { encoding: 'utf-8' });
-      return output.trim();
+      const credentialsFile = join(process.env.HOME || '', '.aws', 'credentials');
+      const credentialsData = readFileSync(credentialsFile, 'utf-8');
+
+      const config: AWSConfig = {
+        accessKeyId: this.getConfigValue(credentialsData, 'aws_access_key_id'),
+        secretAccessKey: this.getConfigValue(credentialsData, 'aws_secret_access_key'),
+        region: 'us-east-1' // Default region, can be overridden by AWS_REGION env var
+      };
+
+      // Check for region in ~/.aws/config
+      try {
+        const configFile = join(process.env.HOME || '', '.aws', 'config');
+        const configData = readFileSync(configFile, 'utf-8');
+        const regionFromConfig = this.getConfigValue(configData, 'region');
+        if (regionFromConfig) {
+          config.region = regionFromConfig;
+        }
+      } catch {
+        // Config file doesn't exist, use default region
+      }
+
+      // Allow environment variable to override region
+      if (process.env.AWS_REGION) {
+        config.region = process.env.AWS_REGION;
+      }
+
+      if (!config.accessKeyId || !config.secretAccessKey) {
+        throw new Error('Missing AWS credentials in ~/.aws/credentials file');
+      }
+
+      // Initialize S3 client
+      this.s3Client = new S3Client({
+        region: config.region,
+        credentials: {
+          accessKeyId: config.accessKeyId,
+          secretAccessKey: config.secretAccessKey
+        }
+      });
     } catch (error) {
-      throw new Error(`AWS CLI command failed: ${error}`);
+      throw new Error(`Could not load AWS credentials: ${error instanceof Error ? error.message : error}`);
     }
   }
 
@@ -65,19 +109,31 @@ class AWSGlacierTool {
   }
 
   /**
-   * Get the size of a specific S3 bucket
+   * Get the size of a specific S3 bucket using AWS SDK
    */
-  private getBucketSize(bucketName: string): number {
+  private async getBucketSize(bucketName: string): Promise<number> {
     try {
-      const command = `aws s3api list-objects-v2 --bucket "${bucketName}" --query "sum(Contents[].Size)" --output text`;
-      const output = this.executeAwsCommand(command);
+      let totalSize = 0;
+      let continuationToken: string | undefined;
 
-      // AWS CLI returns "None" if bucket is empty or has no objects
-      if (output === 'None' || output === '') {
-        return 0;
-      }
+      do {
+        const command = new ListObjectsV2Command({
+          Bucket: bucketName,
+          ContinuationToken: continuationToken
+        });
 
-      return parseInt(output, 10) || 0;
+        const response = await this.s3Client.send(command);
+
+        if (response.Contents) {
+          for (const obj of response.Contents) {
+            totalSize += obj.Size || 0;
+          }
+        }
+
+        continuationToken = response.NextContinuationToken;
+      } while (continuationToken);
+
+      return totalSize;
     } catch (error) {
       console.warn(`Warning: Could not get size for bucket ${bucketName}: ${error}`);
       return 0;
@@ -85,38 +141,35 @@ class AWSGlacierTool {
   }
 
   /**
-   * Get all objects in a bucket with their storage class information
+   * Get all objects in a bucket with their storage class information using AWS SDK
    */
   private async getBucketObjects(bucketName: string): Promise<S3Object[]> {
     console.log(`Scanning bucket "${bucketName}" for objects...`);
 
     const objects: S3Object[] = [];
-    let continuationToken = '';
+    let continuationToken: string | undefined;
 
     do {
-      const tokenParam = continuationToken ? `--continuation-token "${continuationToken}"` : '';
-      const command = `aws s3api list-objects-v2 --bucket "${bucketName}" ${tokenParam} --query "Contents[].{Key:Key,Size:Size,StorageClass:StorageClass,LastModified:LastModified}" --output json`;
-
       try {
-        const output = this.executeAwsCommand(command);
-        const objectsData = JSON.parse(output);
+        const command = new ListObjectsV2Command({
+          Bucket: bucketName,
+          ContinuationToken: continuationToken
+        });
 
-        if (objectsData && Array.isArray(objectsData)) {
-          for (const obj of objectsData) {
+        const response = await this.s3Client.send(command);
+
+        if (response.Contents) {
+          for (const obj of response.Contents) {
             objects.push({
-              key: obj.Key,
+              key: obj.Key || '',
               size: obj.Size || 0,
               storageClass: obj.StorageClass || 'STANDARD',
-              lastModified: obj.LastModified
+              lastModified: obj.LastModified?.toISOString() || ''
             });
           }
         }
 
-        // Check if there are more objects to fetch
-        const nextTokenCommand = `aws s3api list-objects-v2 --bucket "${bucketName}" ${tokenParam} --query "NextContinuationToken" --output text`;
-        const nextToken = this.executeAwsCommand(nextTokenCommand);
-        continuationToken = (nextToken && nextToken !== 'None') ? nextToken : '';
-
+        continuationToken = response.NextContinuationToken;
       } catch (error) {
         throw new Error(`Failed to list objects in bucket ${bucketName}: ${error}`);
       }
@@ -218,7 +271,7 @@ class AWSGlacierTool {
   }
 
   /**
-   * Actually restore objects from Glacier (bulk mode, 2 days)
+   * Actually restore objects from Glacier (bulk mode, 2 days) using AWS SDK
    */
   public async restoreObjects(bucketName: string, dryRun: boolean = false): Promise<RestoreOperation> {
     const operation = await this.dryRunRestore(bucketName);
@@ -236,16 +289,18 @@ class AWSGlacierTool {
 
     for (const obj of operation.objects) {
       try {
-        const restoreRequest = {
-          Days: 2,
-          GlacierJobParameters: {
-            Tier: 'Bulk'
+        const command = new RestoreObjectCommand({
+          Bucket: bucketName,
+          Key: obj.key,
+          RestoreRequest: {
+            Days: 2,
+            GlacierJobParameters: {
+              Tier: 'Bulk'
+            }
           }
-        };
+        });
 
-        const command = `aws s3api restore-object --bucket "${bucketName}" --key "${obj.key}" --restore-request '${JSON.stringify(restoreRequest)}'`;
-
-        this.executeAwsCommand(command);
+        await this.s3Client.send(command);
         successCount++;
 
         if (successCount % 10 === 0) {
@@ -267,29 +322,35 @@ class AWSGlacierTool {
   }
 
   /**
-   * List all S3 buckets and their sizes
+   * List all S3 buckets and their sizes using AWS SDK
    */
   public async listBucketsWithSizes(): Promise<S3Bucket[]> {
     console.log('Fetching S3 buckets...');
 
-    // Get list of all buckets
-    const bucketsOutput = this.executeAwsCommand('aws s3api list-buckets --query "Buckets[].{Name:Name,CreationDate:CreationDate}" --output json');
-    const bucketsData = JSON.parse(bucketsOutput);
+    // Get list of all buckets using AWS SDK
+    const command = new ListBucketsCommand({});
+    const response = await this.s3Client.send(command);
 
-    console.log(`Found ${bucketsData.length} buckets. Calculating sizes...`);
+    if (!response.Buckets) {
+      return [];
+    }
+
+    console.log(`Found ${response.Buckets.length} buckets. Calculating sizes...`);
 
     const buckets: S3Bucket[] = [];
 
-    for (const bucket of bucketsData) {
-      console.log(`Getting size for bucket: ${bucket.Name}`);
-      const size = this.getBucketSize(bucket.Name);
+    for (const bucket of response.Buckets) {
+      if (bucket.Name) {
+        console.log(`Getting size for bucket: ${bucket.Name}`);
+        const size = await this.getBucketSize(bucket.Name);
 
-      buckets.push({
-        name: bucket.Name,
-        creationDate: bucket.CreationDate,
-        size: size,
-        sizeFormatted: this.formatBytes(size)
-      });
+        buckets.push({
+          name: bucket.Name,
+          creationDate: bucket.CreationDate?.toISOString() || '',
+          size: size,
+          sizeFormatted: this.formatBytes(size)
+        });
+      }
     }
 
     // Sort buckets by size (largest first)
@@ -322,19 +383,22 @@ class AWSGlacierTool {
   }
 
   /**
-   * Get the restore status of objects in a bucket
+   * Get the restore status of objects in a bucket using AWS SDK
    */
   private async getObjectRestoreStatus(bucketName: string, objectKey: string): Promise<RestoreStatus> {
     try {
-      const command = `aws s3api head-object --bucket "${bucketName}" --key "${objectKey}" --output json`;
-      const output = this.executeAwsCommand(command);
-      const objectData = JSON.parse(output);
+      const command = new HeadObjectCommand({
+        Bucket: bucketName,
+        Key: objectKey
+      });
+
+      const response = await this.s3Client.send(command);
 
       let restoreStatus: 'in-progress' | 'completed' | 'not-requested' = 'not-requested';
       let restoreExpiryDate: string | undefined;
 
-      if (objectData.Restore) {
-        const restoreInfo = objectData.Restore;
+      if (response.Restore) {
+        const restoreInfo = response.Restore;
         if (restoreInfo.includes('ongoing-request="true"')) {
           restoreStatus = 'in-progress';
         } else if (restoreInfo.includes('ongoing-request="false"')) {
@@ -349,10 +413,10 @@ class AWSGlacierTool {
 
       return {
         key: objectKey,
-        storageClass: objectData.StorageClass || 'STANDARD',
+        storageClass: response.StorageClass || 'STANDARD',
         restoreStatus: restoreStatus,
         restoreExpiryDate: restoreExpiryDate,
-        size: objectData.ContentLength || 0
+        size: response.ContentLength || 0
       };
 
     } catch (error) {
@@ -487,7 +551,11 @@ class AWSGlacierTool {
   public showHelp(): void {
     console.log('AWS S3 Glacier Management Tool');
     console.log('==============================\n');
-    console.log('Available commands:');
+    console.log('Configuration:');
+    console.log('  Uses standard AWS credentials from ~/.aws/credentials');
+    console.log('  Region from ~/.aws/config or AWS_REGION environment variable');
+    console.log('  Default region: us-east-1');
+    console.log('\nAvailable commands:');
     console.log('  list                    - List all S3 buckets and their sizes');
     console.log('  dry-run <bucket>        - Simulate restoration without actually restoring files');
     console.log('  restore <bucket>        - Restore files from Deep Glacier (bulk mode, 2 days)');
@@ -497,6 +565,15 @@ class AWSGlacierTool {
     console.log('  node dist/index.js dry-run my-bucket-name');
     console.log('  node dist/index.js restore my-bucket-name');
     console.log('  node dist/index.js status my-bucket-name');
+  }
+
+  /**
+   * Get AWS config value from the config file content
+   */
+  private getConfigValue(configData: string, key: string): string {
+    const regex = new RegExp(`^${key}\\s*=\\s*(.*)$`, 'm');
+    const match = configData.match(regex);
+    return match ? match[1] : '';
   }
 }
 
