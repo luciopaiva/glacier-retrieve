@@ -1,0 +1,42 @@
+name: Build and Type Check
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Read Node.js version from .nvmrc
+      id: nvmrc
+      run: echo "node-version=$(cat .nvmrc)" >> $GITHUB_OUTPUT
+
+    - name: Use Node.js from .nvmrc
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ steps.nvmrc.outputs.node-version }}
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Type check
+      run: npx tsc --noEmit
+
+    - name: Build project
+      run: npm run build
+
+    - name: Check build output
+      run: |
+        if [ ! -f "dist/index.js" ]; then
+          echo "Build failed: dist/index.js not found"
+          exit 1
+        fi
+        echo "Build successful: dist/index.js created"
