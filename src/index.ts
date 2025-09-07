@@ -285,7 +285,7 @@ class AWSGlacierTool {
         const totalSize = restorableObjects.reduce((sum, obj) => sum + obj.size, 0);
 
         console.log(`\nObjects that would be restored from Glacier storage classes:`);
-        console.log('-'.repeat(60));
+        console.log('-'.repeat(130));
 
         if (restorableObjects.length === 0) {
             console.log('No objects available for restoration.');
@@ -294,13 +294,13 @@ class AWSGlacierTool {
             // Sort by size (largest first) for better visibility
             restorableObjects.sort((a, b) => b.size - a.size);
 
-            console.log('Key'.padEnd(50) + 'Storage Class'.padEnd(15) + 'Size');
-            console.log('-'.repeat(80));
+            const maxKeyLength = 2 + restorableObjects.reduce((max, obj) => Math.max(max, obj.key.length), 0);
+            console.log('Key'.padEnd(maxKeyLength) + 'Storage Class'.padEnd(15) + 'Size');
+            console.log('-'.repeat(130));
 
             restorableObjects.forEach(obj => {
-                const key = obj.key.length > 45 ? '...' + obj.key.slice(-42) : obj.key;
                 console.log(
-                    key.padEnd(50) +
+                    obj.key.padEnd(maxKeyLength) +
                     obj.storageClass.padEnd(15) +
                     this.formatBytes(obj.size)
                 );
