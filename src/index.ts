@@ -20,6 +20,24 @@ interface RestoreOperation {
   totalSizeFormatted: string;
 }
 
+interface RestoreStatus {
+  key: string;
+  storageClass: string;
+  restoreStatus: 'in-progress' | 'completed' | 'not-requested';
+  restoreExpiryDate?: string;
+  size: number;
+}
+
+interface StatusSummary {
+  bucketName: string;
+  totalObjects: number;
+  inProgress: number;
+  completed: number;
+  notRequested: number;
+  totalSizeInProgress: number;
+  totalSizeCompleted: number;
+}
+
 class AWSGlacierTool {
   /**
    * Execute AWS CLI command and return the output
@@ -304,6 +322,192 @@ class AWSGlacierTool {
   }
 
   /**
+   * Get the restore status of objects in a bucket
+   */
+  private async getObjectRestoreStatus(bucketName: string, objectKey: string): Promise<RestoreStatus> {
+    try {
+      const command = `aws s3api head-object --bucket "${bucketName}" --key "${objectKey}" --output json`;
+      const output = this.executeAwsCommand(command);
+      const objectData = JSON.parse(output);
+
+      let restoreStatus: 'in-progress' | 'completed' | 'not-requested' = 'not-requested';
+      let restoreExpiryDate: string | undefined;
+
+      if (objectData.Restore) {
+        const restoreInfo = objectData.Restore;
+        if (restoreInfo.includes('ongoing-request="true"')) {
+          restoreStatus = 'in-progress';
+        } else if (restoreInfo.includes('ongoing-request="false"')) {
+          restoreStatus = 'completed';
+          // Extract expiry date if available
+          const expiryMatch = restoreInfo.match(/expiry-date="([^"]+)"/);
+          if (expiryMatch) {
+            restoreExpiryDate = expiryMatch[1];
+          }
+        }
+      }
+
+      return {
+        key: objectKey,
+        storageClass: objectData.StorageClass || 'STANDARD',
+        restoreStatus: restoreStatus,
+        restoreExpiryDate: restoreExpiryDate,
+        size: objectData.ContentLength || 0
+      };
+
+    } catch (error) {
+      // If we can't get the object info, assume it's not requested
+      return {
+        key: objectKey,
+        storageClass: 'UNKNOWN',
+        restoreStatus: 'not-requested',
+        size: 0
+      };
+    }
+  }
+
+  /**
+   * Check the status of Glacier retrievals for a bucket
+   */
+  public async checkRestoreStatus(bucketName: string): Promise<StatusSummary> {
+    console.log(`\nChecking restore status for bucket: ${bucketName}`);
+    console.log('=' .repeat(60));
+
+    // Get all objects in Glacier storage classes
+    const allObjects = await this.getBucketObjects(bucketName);
+    const glacierObjects = this.filterGlacierObjects(allObjects);
+
+    if (glacierObjects.length === 0) {
+      console.log('No objects found in Glacier storage classes.');
+      return {
+        bucketName: bucketName,
+        totalObjects: 0,
+        inProgress: 0,
+        completed: 0,
+        notRequested: 0,
+        totalSizeInProgress: 0,
+        totalSizeCompleted: 0
+      };
+    }
+
+    console.log(`Found ${glacierObjects.length} objects in Glacier storage classes.`);
+    console.log('Checking restore status for each object...\n');
+
+    const statusResults: RestoreStatus[] = [];
+    let processed = 0;
+
+    for (const obj of glacierObjects) {
+      const status = await this.getObjectRestoreStatus(bucketName, obj.key);
+      statusResults.push(status);
+      processed++;
+
+      if (processed % 10 === 0) {
+        console.log(`Processed ${processed}/${glacierObjects.length} objects...`);
+      }
+    }
+
+    // Categorize results
+    const inProgress = statusResults.filter(s => s.restoreStatus === 'in-progress');
+    const completed = statusResults.filter(s => s.restoreStatus === 'completed');
+    const notRequested = statusResults.filter(s => s.restoreStatus === 'not-requested');
+
+    const totalSizeInProgress = inProgress.reduce((sum, obj) => sum + obj.size, 0);
+    const totalSizeCompleted = completed.reduce((sum, obj) => sum + obj.size, 0);
+
+    return {
+      bucketName: bucketName,
+      totalObjects: glacierObjects.length,
+      inProgress: inProgress.length,
+      completed: completed.length,
+      notRequested: notRequested.length,
+      totalSizeInProgress: totalSizeInProgress,
+      totalSizeCompleted: totalSizeCompleted
+    };
+  }
+
+  /**
+   * Display detailed restore status information
+   */
+  public async displayRestoreStatus(bucketName: string): Promise<void> {
+    const summary = await this.checkRestoreStatus(bucketName);
+
+    console.log('\n' + '='.repeat(60));
+    console.log('RESTORE STATUS SUMMARY');
+    console.log('='.repeat(60));
+    console.log(`Bucket: ${summary.bucketName}`);
+    console.log(`Total Glacier objects: ${summary.totalObjects}`);
+    console.log();
+    console.log(`📥 In Progress: ${summary.inProgress} objects (${this.formatBytes(summary.totalSizeInProgress)})`);
+    console.log(`✅ Completed: ${summary.completed} objects (${this.formatBytes(summary.totalSizeCompleted)})`);
+    console.log(`⏸️  Not Requested: ${summary.notRequested} objects`);
+
+    if (summary.inProgress > 0) {
+      console.log('\n' + '-'.repeat(60));
+      console.log('OBJECTS WITH ONGOING RESTORE REQUESTS:');
+      console.log('-'.repeat(60));
+
+      // Get detailed status for in-progress objects
+      const allObjects = await this.getBucketObjects(bucketName);
+      const glacierObjects = this.filterGlacierObjects(allObjects);
+
+      let inProgressCount = 0;
+      for (const obj of glacierObjects) {
+        const status = await this.getObjectRestoreStatus(bucketName, obj.key);
+        if (status.restoreStatus === 'in-progress') {
+          const key = obj.key.length > 50 ? '...' + obj.key.slice(-47) : obj.key;
+          console.log(`${key.padEnd(50)} ${status.storageClass.padEnd(15)} ${this.formatBytes(obj.size)}`);
+          inProgressCount++;
+          if (inProgressCount >= 20) {
+            console.log(`... and ${summary.inProgress - 20} more objects`);
+            break;
+          }
+        }
+      }
+    }
+
+    if (summary.completed > 0) {
+      console.log('\n' + '-'.repeat(60));
+      console.log('RECENTLY COMPLETED RESTORES:');
+      console.log('-'.repeat(60));
+
+      // Get detailed status for completed objects
+      const allObjects = await this.getBucketObjects(bucketName);
+      const glacierObjects = this.filterGlacierObjects(allObjects);
+
+      let completedCount = 0;
+      for (const obj of glacierObjects) {
+        const status = await this.getObjectRestoreStatus(bucketName, obj.key);
+        if (status.restoreStatus === 'completed') {
+          const key = obj.key.length > 40 ? '...' + obj.key.slice(-37) : obj.key;
+          const expiry = status.restoreExpiryDate ?
+            new Date(status.restoreExpiryDate).toLocaleDateString() : 'Unknown';
+          console.log(`${key.padEnd(40)} ${status.storageClass.padEnd(15)} ${this.formatBytes(obj.size).padEnd(10)} Expires: ${expiry}`);
+          completedCount++;
+          if (completedCount >= 10) {
+            console.log(`... and ${summary.completed - 10} more objects`);
+            break;
+          }
+        }
+      }
+    }
+
+    console.log('\n' + '='.repeat(60));
+    if (summary.inProgress > 0) {
+      console.log('⏳ Some restore requests are still in progress.');
+      console.log('   Files will be available for download once restoration completes.');
+      console.log('   Bulk requests typically take 5-12 hours to complete.');
+    }
+    if (summary.completed > 0) {
+      console.log('✅ Some files are ready for download!');
+      console.log('   Note: Restored files are temporarily available and will expire.');
+    }
+    if (summary.notRequested > 0) {
+      console.log(`🔄 ${summary.notRequested} objects have not been restored yet.`);
+      console.log(`   Run 'dry-run ${bucketName}' to see what would be restored.`);
+    }
+  }
+
+  /**
    * Show available commands
    */
   public showHelp(): void {
@@ -313,7 +517,7 @@ class AWSGlacierTool {
     console.log('  list                    - List all S3 buckets and their sizes');
     console.log('  dry-run <bucket>        - Simulate restoration without actually restoring files');
     console.log('  restore <bucket>        - Restore files from Deep Glacier (bulk mode, 2 days)');
-    console.log('  status <bucket>         - Check status of ongoing Glacier retrievals (coming soon)');
+    console.log('  status <bucket>         - Check status of ongoing Glacier retrievals');
     console.log('\nUsage:');
     console.log('  node dist/index.js list');
     console.log('  node dist/index.js dry-run my-bucket-name');
@@ -392,7 +596,11 @@ async function main() {
           console.log('Usage: node dist/index.js status <bucket-name>');
           process.exit(1);
         }
-        console.log(`Status feature for bucket "${statusBucketName}" - Coming soon!`);
+
+        console.log('AWS S3 Glacier Management Tool');
+        console.log('==============================');
+
+        await tool.displayRestoreStatus(statusBucketName);
         break;
 
       default:
