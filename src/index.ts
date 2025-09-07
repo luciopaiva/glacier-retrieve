@@ -713,7 +713,7 @@ async function main() {
 
 // Run the tool if this file is executed directly
 if (require.main === module) {
-    await main();
+    main();
 }
 
 export { AWSGlacierTool, S3Bucket };
