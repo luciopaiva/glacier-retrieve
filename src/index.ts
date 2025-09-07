@@ -234,33 +234,28 @@ class AWSGlacierTool {
       console.log(`  ${storageClass}: ${count} objects (${this.formatBytes(size)})`);
     }
 
-    console.log(`\nObjects that would be restored from Glacier storage classes:`);
-    console.log('-'.repeat(60));
-
     if (glacierObjects.length === 0) {
       console.log('No objects found in Glacier storage classes.');
     } else {
       // Sort by size (largest first) for better visibility
       glacierObjects.sort((a, b) => b.size - a.size);
 
-      // Display first 20 objects to avoid overwhelming output
-      const displayObjects = glacierObjects.slice(0, 20);
+      const longestKeyLength = 2 + glacierObjects.reduce((max, obj) => Math.max(max, obj.key.length), 0);
+      const horizontalBarLength = longestKeyLength + 30;
 
-      console.log('Key'.padEnd(50) + 'Storage Class'.padEnd(15) + 'Size');
-      console.log('-'.repeat(80));
+      console.log(`\nObjects that would be restored from Glacier storage classes:`);
+      console.log('-'.repeat(horizontalBarLength));
 
-      displayObjects.forEach(obj => {
-        const key = obj.key.length > 45 ? '...' + obj.key.slice(-42) : obj.key;
+      console.log('Key'.padEnd(longestKeyLength) + 'Storage Class'.padEnd(15) + 'Size');
+      console.log('-'.repeat(horizontalBarLength));
+
+        glacierObjects.forEach(obj => {
         console.log(
-          key.padEnd(50) +
+          obj.key.padEnd(longestKeyLength) +
           obj.storageClass.padEnd(15) +
           this.formatBytes(obj.size)
         );
       });
-
-      if (glacierObjects.length > 20) {
-        console.log(`... and ${glacierObjects.length - 20} more objects`);
-      }
     }
 
     return {
