@@ -294,13 +294,10 @@ class AWSGlacierTool {
             // Sort by size (largest first) for better visibility
             restorableObjects.sort((a, b) => b.size - a.size);
 
-            // Display first 20 objects to avoid overwhelming output
-            const displayObjects = restorableObjects.slice(0, 20);
-
             console.log('Key'.padEnd(50) + 'Storage Class'.padEnd(15) + 'Size');
             console.log('-'.repeat(80));
 
-            displayObjects.forEach(obj => {
+            restorableObjects.forEach(obj => {
                 const key = obj.key.length > 45 ? '...' + obj.key.slice(-42) : obj.key;
                 console.log(
                     key.padEnd(50) +
@@ -308,10 +305,6 @@ class AWSGlacierTool {
                     this.formatBytes(obj.size)
                 );
             });
-
-            if (restorableObjects.length > 20) {
-                console.log(`... and ${restorableObjects.length - 20} more objects`);
-            }
         }
 
         return {
